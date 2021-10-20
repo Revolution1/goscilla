@@ -1,21 +1,21 @@
-        match both_zero with
-        | True => uint256_0
-        | False =>
-          let total = builtin add available_liquidity total_borrows in
-            ray_div total_borrows total
-        end
+type Error =
+  | SenderNotConfigurator
+  | ReserveNotExists
+  | UserReserveDataNotExists
+  | SenderNotLendingPoolManager
+  | SenderNotOwner
+  | ReserveExist of Uint32
 
-
-type UserReserveData =
-| UserReserveData of Uint256 Uint256 Uint256 Uint256 Bool
-| UserReserveData of Uint256 Uint256 Uint256 Uint256 Bool
-| UserReserveData of Uint256 Uint256 Uint256 Uint256 Bool
-
-
-
-
-
-let bool_active = True
-let bool_inactive = False
-let addfunds_tag = "AddFunds"
-let zero_uint128 = Uint128 0
+let make_error =
+  fun (result: Error) =>
+    let result_code =
+      match result with
+            | SenderNotConfigurator => Int32 -1
+            | ReserveNotExists => Int32 -2
+            | UserReserveDataNotExists => Int32 -3
+        | SenderNotLendingPoolManager => Int32 -4
+            | SenderNotOwner => Int32 -5
+            | ReserveExist => let a = Int32 -6
+      end
+    in
+    {_exception: "Error"; code: result_code}

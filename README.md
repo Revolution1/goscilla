@@ -6,6 +6,7 @@
 - [x] lexer
 - [ ] prettier
 - [ ] parser
+- [ ] language server
 - [ ] execute
 - [ ] gas
 - [ ] llvm

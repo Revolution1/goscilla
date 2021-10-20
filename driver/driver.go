@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/rhysd/locerr"
 	"github.com/sirupsen/logrus"
+	"goscilla/prettifier"
 	"goscilla/syntax"
 	"goscilla/token"
 	"os"
@@ -51,7 +52,7 @@ func (d *Driver) PrintTokens(src *locerr.Source) {
 // Prettify print prettified code.
 func (d *Driver) Prettify(src *locerr.Source) {
 	tokens := d.Lex(src)
-	err := syntax.Prettify(tokens, os.Stdout, nil)
+	err := prettifier.Prettify(tokens, os.Stdout, nil)
 	if err != nil {
 		logrus.Error(err)
 	}

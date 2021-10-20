@@ -271,7 +271,7 @@ func lexWhiteSpace(l *Lexer) stateFn {
 	l.eat()
 	for {
 		if l.eof {
-			return lex
+			break
 		}
 		if l.top != '\n' && l.top != '\r' && unicode.IsSpace(l.top) {
 			l.eat()
@@ -440,8 +440,9 @@ func lex(l *Lexer) stateFn {
 			if l.top == '>' {
 				l.eat()
 				l.emit(token.ARROW)
+			} else {
+				l.emit(token.EQ)
 			}
-			l.emit(token.EQ)
 		case '"': // read string
 			return lexStringLiteral
 		case '\n': // Unix

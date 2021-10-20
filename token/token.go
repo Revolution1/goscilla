@@ -110,6 +110,7 @@ const (
 	PAIR
 
 	// Other tokens
+	INDENT // only for pretty formatting
 	EOF
 )
 
@@ -131,6 +132,7 @@ var TokenTable = [EOF + 1]string{
 	SPID: "SPID",
 
 	// others
+	INDENT:  "INDENT",
 	ILLEGAL: "ILLEGAL",
 	EOF:     "EOF",
 }
@@ -253,6 +255,17 @@ type Token struct {
 	Start locerr.Pos
 	End   locerr.Pos
 	File  *locerr.Source
+	lit   string
+}
+
+func NewOrphanToken(kind Kind, lit string) *Token {
+	return &Token{
+		Kind:  kind,
+		Start: locerr.Pos{},
+		End:   locerr.Pos{},
+		File:  nil,
+		lit:   lit,
+	}
 }
 
 // String returns an information of token. This method is used mainly for
@@ -268,10 +281,21 @@ func (tok *Token) String() string {
 
 // Value returns the corresponding a string part of code.
 func (tok *Token) Value() string {
-	return string(tok.File.Code[tok.Start.Offset:tok.End.Offset])
+	if tok.lit != "" {
+		return tok.lit
+	}
+	val := string(tok.File.Code[tok.Start.Offset:tok.End.Offset])
+	if val == "" && tok.Kind != EOF {
+		panic("empty token")
+	}
+	return val
+}
+
+func (tok *Token) SetLiteral(s string) {
+	tok.lit = s
 }
 
 // DisplayValue returns the corresponding a string part of code with characters escaped.
 func (tok *Token) DisplayValue() string {
-	return strconv.QuoteToASCII(string(tok.File.Code[tok.Start.Offset:tok.End.Offset]))
+	return strconv.QuoteToASCII(tok.Value())
 }
