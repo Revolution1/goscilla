@@ -1,0 +1,997 @@
+scilla_version 0
+
+import ListUtils IntUtils BoolUtils
+
+library ZILLending
+
+(*******************************************)
+(*             Core Part                   *)
+(*******************************************)
+
+(* 1. last_liquidity_cumulative_index the liquidity index. Expressed in ray *)
+(* 8. last_variable_borrow_cumulative_index variable borrow index. Expressed in ray *)
+type ReserveIndex =
+| ReserveIndex of Uint256 Uint256
+
+(* 2. current_liquidity_rate the current supply rate. Expressed in ray *)
+(* 5. current_variable_borrow_rate the current variable borrow rate. Expressed in ray *)
+(* 6. current_stable_borrow_rate the current stable borrow rate. Expressed in ray *)
+(* 7. current_average_stable_borrow_rate the current average stable borrow rate (weighted average of all the different stable rate loans). Expressed in ray *)
+type ReserveCurrentRate =
+| ReserveCurrentRate of Uint256 Uint256 Uint256 Uint256
+
+(* 10. liquidation_threshold the liquidation threshold of the reserve. Expressed in percentage (0-100) *)
+(* 11. liquidation_bonus the liquidation bonus of the reserve. Expressiod in percentage *)
+(* 12. decimals the decimals of the reserve asset *)
+(* 13. a_token_address address of the aToken representing the asset *)
+(* 14. interest_rate_strategy_address address of the interest rate strategy contract*)
+type ReserveConfig =
+| ReserveConfig of Uint256 Uint256 Uint256 ByStr20 ByStr20
+
+(* 16. borrowing_enabled == true means users can borrow from this reserve *)
+(* 17. usage_as_collateral_enabled == true means users can this reserve as collateral *)
+(* 18. is_stable_borrow_rate_enabled == true means users can borrow at a stable rate*)
+(* 19. is_active == true means the reserve has been activated and properly configured *)
+(* 20. is_freezed == true means the reserve only allow repays and redeems, but not deposits, new borrowing or rate swap *)
+type ReserveControl =
+| ReserveControl of Bool Bool Bool Bool Bool
+
+(* 3. total_borrows_stable the total borrows of the reserve at a stable rate. Expressed in the currency decimals *)
+(* 4. total_borrows_variable the total borrows of the reserce at a variable rate. Expressed in the currency decimals *)
+(* 9. base_LTV_as_collateral the ltv of the reserve. Expressed in percentage (0-100) *)
+type ReserveExtra =
+| ReserveExtra of Uint256 Uint256 Uint256
+
+
+(* 1. principal_borrow_balance principal amount borrowed by the user *)
+(* 2. last_variable_borrow_cummulative_index cumulated variable borrow index fot the user. Expressed in ray *)
+(* 3. originateion_fee origination fee cumulated by the user *)
+(* 4. stable_borrow_rate stable borrow rate at which the user has borrowed. Expressed in ray *)
+(* 6. user_as_collateral defines if a specific deposit should or not be used as a collateral in borrows *)
+type UserReserveData =
+| UserReserveData of Uint256 Uint256 Uint256 Uint256 Bool
+
+
+let bool_active = True
+let bool_inactive = False
+let addfunds_tag = "AddFunds"
+let zero_uint128 = Uint128 0
+
+let one_msg =
+  fun (msg : Message) =>
+  let nil_msg = Nil {Message} in
+  Cons {Message} msg nil_msg
+
+type Error =
+  | SenderNotConfigurator
+  | ReserveNotExists
+  | UserReserveDataNotExists
+  | SenderNotLendingPoolManager
+  | SenderNotOwner
+  | ReserveExist
+
+let make_error =
+  fun (result: Error) =>
+    let result_code =
+      match result with
+      | SenderNotConfigurator => Int32 -1
+      | ReserveNotExists => Int32 -2
+      | UserReserveDataNotExists => Int32 -3
+      | SenderNotLendingPoolManager => Int32 -4
+      | SenderNotOwner => Int32 -5
+      | ReserveExist => Int32 -6
+      end
+    in
+    {_exception: "Error"; code: result_code}
+
+let get_total_borrow =
+  fun (borrow: ReserveExtra) =>
+  match borrow with
+  | ReserveExtra total_borrows_stable total_borrows_variable _ =>
+    let total_borrows = builtin add total_borrows_stable total_borrows_variable in
+      total_borrows
+  end
+
+let wad = Uint256 1000000000000000000
+let half_wad = Uint256 500000000000000000
+let ray = Uint256 1000000000000000000000000000
+let half_ray = Uint256 500000000000000000000000000
+let wad_ray_ratio = Uint256 1000000000
+
+let uint256_2 = Uint256 2
+let uint256_0 = Uint256 0
+let uint32_0 = Uint32 0
+let uint32_1 = Uint32 1
+let uint32_2 = Uint32 2
+let seconds_per_year = Uint256 31556926
+(* can work out on 50000000 * 2 *)
+let delta = Uint32 25
+let zero_address = 0x0000000000000000000000000000000000000000
+let uint128_zero = Uint128 0
+
+let u128_to_u256 =
+  fun (n: Uint128) =>
+    let m_opt = builtin to_uint256 n in
+      match m_opt with
+      | Some m => m
+      | None => uint256_0
+      end
+
+(* todo safe math?? *)
+(* (half_wad + a * b) / wad *)
+let wad_mul =
+  fun (a: Uint256) =>
+  fun (b: Uint256) =>
+    let c = builtin mul a b in
+    let d = builtin add half_wad c in
+      builtin div d wad
+
+let wad_div =
+  fun (a: Uint256) =>
+  fun (b: Uint256) =>
+    let half_b = builtin div b uint256_2 in
+    let c = builtin mul a wad in
+    let d = builtin add half_b c in
+      builtin div d b
+
+let ray_mul =
+  fun (a: Uint256) =>
+  fun (b: Uint256) =>
+    let c = builtin mul a b in
+    let d = builtin add half_ray c in
+      builtin div d ray
+
+let ray_div =
+  fun (a: Uint256) =>
+  fun (b: Uint256) =>
+    let half_b = builtin div b uint256_2 in
+    let c = builtin mul a ray in
+    let d = builtin add half_b c in
+      builtin div d b
+
+let ray_to_wad =
+  fun (a: Uint256) =>
+    let half_ratio = builtin div wad_ray_ratio uint256_2 in
+    let b = builtin add half_ratio a in
+      builtin div b wad_ray_ratio
+
+let wad_to_ray =
+  fun (a: Uint256) =>
+    builtin mul a wad_ray_ratio
+
+let gt_than_zero =
+  fun (a: Uint32) =>
+    builtin lt uint32_0 a
+
+(* if m == 1, n == 100000000, this function results list[2,5,11,23,47,95,...,12500000,25000000,50000000]*)
+let get_operation_list : Uint32 -> Uint32 -> List Uint32 =
+  fun (m : Uint32) => fun (n : Uint32) =>
+    let m_lt_n = builtin lt m n in
+    match m_lt_n with
+    | True =>
+      (* let delta = builtin sub n m in *)
+      let delta_nat = builtin to_nat delta in
+      let nil = Nil {Uint32} in
+      let acc_init = Pair {(List Uint32) Uint32} nil n in
+      let two = Uint32 2 in
+      let step = fun (xs_n : Pair (List Uint32) Uint32) => fun (ignore : Nat) =>
+        match xs_n with
+        | Pair xs n =>
+          let new_n = builtin div n two in
+          let new_xs = Cons {Uint32} new_n xs in
+          Pair {(List Uint32) Uint32} new_xs new_n
+        end in
+        let fold = @nat_fold (Pair (List Uint32) Uint32) in
+        let xs_m = fold step acc_init delta_nat in
+        match xs_m with
+        | Pair xs m =>
+          let gt_zero_uint32 = @list_filter Uint32 in
+          gt_zero_uint32 gt_than_zero xs
+        end
+    | False => Nil {Uint32}
+    end
+
+type XZPair =
+| XZPair of Uint256 Uint256
+
+let operation_list_fold_fn =
+  (* pair of x z *)
+  fun (p: XZPair) =>
+  (* element of the operation list, which is n *)
+  fun (n: Uint32) =>
+    match p with
+    | XZPair x z =>
+      let next_x = ray_mul x x in
+      let r = builtin rem n uint32_2 in
+      let r_is_zero = builtin eq r uint32_0 in
+      let next_z = match r_is_zero with
+      | True => z
+      | False =>
+        ray_mul z x
+      end in XZPair next_x next_z
+    end
+
+(* for (n /= 2; n != 0; n /= 2) {
+  z = n % 2 != 0 ? x : RAY;
+  x = rayMul(x, x);
+
+  if (n % 2 != 0) {
+    z = rayMul(z, x);
+  }
+} *)
+let operation_list_getz =
+  fun (x: Uint256) =>
+  fun (z: Uint256) =>
+  fun (l: List Uint32) =>
+    let init_pair = XZPair x z in
+    let fold = @list_foldl Uint32 XZPair in
+    let result_pair = fold operation_list_fold_fn init_pair l in
+    match result_pair with
+    | XZPair x z => z
+    end
+
+let ray_pow_helper =
+  fun (x: Uint256) =>
+  fun (n: Uint256) =>
+    let r = builtin rem n uint256_2 in
+    let is_zero = builtin eq uint256_0 r in
+    match is_zero with
+    | True => ray
+    | False => x
+    end
+
+let to_uint32_or_zero =
+  fun (n: Uint256) =>
+    let uint32_n_opt = builtin to_uint32 n in
+    match uint32_n_opt with
+    | Some uint32_n => uint32_n
+    | None => uint32_0
+    end
+
+let ray_pow =
+  fun (x: Uint256) =>
+  fun (n: Uint256) =>
+  let uint32_n = to_uint32_or_zero n in
+  let z = ray_pow_helper x n in
+  let operation_list = get_operation_list uint32_1 uint32_n in
+  let list_reverser = @list_reverse Uint32 in
+  let reserved_list = list_reverser operation_list in
+  operation_list_getz x z reserved_list
+
+let calculate_linear_interest =
+  fun (rate: Uint256) =>
+  fun (this_timestamp: Uint256) =>
+  fun (last_update_timestamp: Uint256) =>
+    let time_difference =  builtin sub this_timestamp last_update_timestamp in
+    let time_difference_ray = wad_to_ray time_difference in
+    let seconds_per_year_ray = wad_to_ray seconds_per_year in
+    let time_delta = ray_div time_difference_ray seconds_per_year_ray in
+    let rate_ray_mul_value = ray_mul rate time_delta in
+      builtin add rate_ray_mul_value ray
+
+let calculate_compounded_interest =
+  fun (rate: Uint256) =>
+  fun (this_timestamp: Uint256) =>
+  fun (last_update_timestamp: Uint256) =>
+    let time_difference =  builtin sub this_timestamp last_update_timestamp in
+    let rate_per_second = builtin div rate seconds_per_year in
+    let rate_per_second_add_ray = builtin add rate_per_second ray in
+      ray_pow rate_per_second_add_ray time_difference
+
+let decode_last_liquidity_cumulative_index =
+  fun (ri_opt: Option ReserveIndex) =>
+    match ri_opt with
+    | Some (ReserveIndex last_liquidity_cumulative_index _) =>
+      last_liquidity_cumulative_index
+    | None => uint256_0
+    end
+
+let decode_last_variable_borrow_cumulative_index =
+  fun (ri_opt: Option ReserveIndex) =>
+    match ri_opt with
+    | Some (ReserveIndex _ last_variable_borrow_cumulative_index) => last_variable_borrow_cumulative_index
+    | None => uint256_0
+    end
+
+let encode_last_liquidity_cumulative_index =
+  fun (ri_opt: Option ReserveIndex) =>
+  fun (llci: Uint256) =>
+    match ri_opt with
+    | Some (ReserveIndex _ last_variable_borrow_cumulative_index) =>
+      ReserveIndex llci last_variable_borrow_cumulative_index
+    | None => ReserveIndex uint256_0 uint256_0
+    end
+
+let encode_last_variable_borrow_cumulative_index =
+  fun (ri_opt: Option ReserveIndex) =>
+  fun (lvbci: Uint256) =>
+    match ri_opt with
+    | Some (ReserveIndex last_liquidity_cumulative_index _) =>
+      ReserveIndex last_liquidity_cumulative_index lvbci
+    | None => ReserveIndex uint256_0 uint256_0
+    end
+
+let decode_current_variable_borrow_rate =
+  fun (rcr_opt: Option ReserveCurrentRate) =>
+    match rcr_opt with
+    | Some (ReserveCurrentRate _ current_variable_borrow_rate _ _) => current_variable_borrow_rate
+    | None => uint256_0
+    end
+
+let decode_current_liquidity_rate =
+  fun (rcr_opt: Option ReserveCurrentRate) =>
+    match rcr_opt with
+    | Some (ReserveCurrentRate current_liquidity_rate _ _ _) =>
+      current_liquidity_rate
+    | None => uint256_0
+    end
+
+let decode_current_average_stable_borrow_rate =
+  fun (rcr_opt: Option ReserveCurrentRate) =>
+    match rcr_opt with
+    | Some (ReserveCurrentRate _ _ _ current_average_stable_borrow_rate) => current_average_stable_borrow_rate
+    | None => uint256_0
+    end
+
+let decode_last_update_timestamp =
+  fun (lut_opt: Option Uint256) =>
+    match lut_opt with
+    | Some lut => lut
+    | None => uint256_0
+    end
+
+let decode_total_borrows_stable =
+  fun (re_opt: Option ReserveExtra) =>
+    match re_opt with
+    | Some (ReserveExtra total_borrows_stable _ _) => total_borrows_stable
+    | None => uint256_0
+    end
+
+let decode_total_borrows_variable =
+  fun (re_opt: Option ReserveExtra) =>
+    match re_opt with
+    | Some (ReserveExtra _ total_borrows_variable _) => total_borrows_variable
+    | None => uint256_0
+    end
+(*******************************************)
+(*             Strategy Part               *)
+(*******************************************)
+
+(* @dev this constant represents the utilization rate at which the pool *)
+(* aims to obtaion most competitive borrow rates expressed in ray *)
+(* 0.2 * 1e27 *)
+let optimal_utilization_rate = Uint256 800000000000000000000000000
+
+(* @dev this constant represents the excess utilization rate above the optimal. *)
+(* It is always equal to 1-optimal utilization rate. Added as a constant here for gas optimizations *)
+(* expressed in ray *)
+let excess_utilization_rate = Uint256 200000000000000000000000000
+
+(* @dev calculates the overall borrow rate as the weighted average between the total variable borrows and the total stable borrows. *)
+(* @param total_borrow_stable the total borrowed from the reserve at a stable rate *)
+(* @param total_borrow_variable the total borrowed from the reserve at a variable rate *)
+(* @param current_variable_borrow_rate the current variable borrow rate *)
+(* @param current_average_stable_borrow_rate the weighted average of all the stable rate borrows *)
+(* @return the weighted averaged borrow rate *)
+let get_overall_borrow_rate_internal =
+  fun (total_borrow_stable: Uint256) =>
+  fun (total_borrow_variable: Uint256) =>
+  fun (current_variable_borrow_rate: Uint256) =>
+  fun (current_average_stable_borrow_rate: Uint256) =>
+    let total_borrows = builtin add total_borrow_stable total_borrow_variable in
+    let is_total_borrows_zero = builtin eq total_borrows uint256_0 in
+    let overall_borrow_rate =
+      match is_total_borrows_zero with
+      | True => uint256_0
+      | False =>
+        let total_borrows_variable_ray = wad_to_ray total_borrow_variable in
+        let weighted_variable_rate = ray_mul total_borrows_variable_ray current_variable_borrow_rate in
+        let total_borrows_stable_ray = wad_to_ray total_borrow_stable in
+        let weighted_stable_rate = ray_mul total_borrows_stable_ray current_average_stable_borrow_rate in
+        let total_borrows_ray = wad_to_ray total_borrows in
+        let total_rate = builtin add weighted_variable_rate weighted_stable_rate in
+          ray_div total_rate total_borrows_ray
+      end
+        in
+          overall_borrow_rate
+
+(* current_stable_borrow_rate *)
+(* current_variable_borrow_rate *)
+type InterestBorrowRates =
+| InterestBorrowRates of Uint256 Uint256
+
+(* current_stable_borrow_rate *)
+(* current_variable_borrow_rate *)
+(* current_liquidity_rate *)
+type InterestBorrowLiquidityRate =
+| InterestBorrowLiquidityRate of Uint256 Uint256 Uint256
+
+(* @dev calculates the interest rates depending on the available liquidity *)
+(* and the total borrowed. *)
+(* @param available_liquidity the liquidity available in the reserve *)
+(* @param total_borrows_stable the total borrowed from the reserve at a stable rate *)
+(* @param total_borrows_variable the total borrowed from the reserce at a varibale rate *)
+(* @param average_stable_borrow_rate the weighted average of all the stable rate borrows *)
+let calculate_interest_rates =
+  fun (available_liquidity: Uint256) =>
+  fun (total_borrows_stable: Uint256) =>
+  fun (total_borrows_variable: Uint256) =>
+  fun (average_stable_borrow_rate: Uint256) =>
+  fun (current_stable_borrow_rate_oracle: Uint256) =>
+  fun (stable_rate_slope1_remote: Uint256) =>
+  fun (stable_rate_slope2_remote: Uint256) =>
+  fun (base_variable_borrow_rate_remote: Uint256) =>
+  fun (variable_rate_slope1_remote: Uint256) =>
+  fun (variable_rate_slope2_remote: Uint256) =>
+    let total_borrows = builtin add total_borrows_stable total_borrows_variable in
+    let utilization_rate =
+        let is_total_borrows_zero = builtin eq total_borrows uint256_0 in
+        let is_available_liquidity_zero = builtin eq available_liquidity uint256_0 in
+        let both_zero = andb is_total_borrows_zero is_available_liquidity_zero in
+        match both_zero with
+        | True => uint256_0
+        | False =>
+          let total = builtin add available_liquidity total_borrows in
+            ray_div total_borrows total
+        end
+      in
+        let is_gt_optimal_rate = builtin lt optimal_utilization_rate utilization_rate in
+        let borrow_rate_pair = match is_gt_optimal_rate with
+          | True =>
+            let excess_utilization_rate = builtin sub utilization_rate optimal_utilization_rate in
+            let excess_utilization_rate_ratio = ray_div excess_utilization_rate excess_utilization_rate in
+            let current_stable_borrow_rate_a = builtin add current_stable_borrow_rate_oracle stable_rate_slope1_remote in
+            let current_stable_borrow_rate_b = builtin add current_stable_borrow_rate_a stable_rate_slope2_remote in
+            let current_stable_borrow_rate = ray_mul current_stable_borrow_rate_b excess_utilization_rate_ratio in
+            let current_variable_borrow_rate_a = builtin add base_variable_borrow_rate_remote variable_rate_slope1_remote in
+            let current_variable_borrow_rate_b = builtin add current_variable_borrow_rate_a variable_rate_slope2_remote in
+            let current_variable_borrow_rate = ray_mul current_variable_borrow_rate_b excess_utilization_rate_ratio in
+            let bp = InterestBorrowRates current_stable_borrow_rate current_variable_borrow_rate in
+              bp
+          | False =>
+            let a = ray_div utilization_rate optimal_utilization_rate in
+            let b = ray_mul stable_rate_slope1_remote a in
+            let current_stable_borrow_rate = builtin add current_stable_borrow_rate_oracle b in
+            let c = ray_div utilization_rate optimal_utilization_rate in
+            let d = ray_mul c variable_rate_slope1_remote in
+            let current_variable_borrow_rate = builtin add base_variable_borrow_rate_remote d in
+            let bp = InterestBorrowRates current_stable_borrow_rate current_variable_borrow_rate in
+              bp
+          end
+          in
+            match borrow_rate_pair with
+            | InterestBorrowRates current_stable_borrow_rate current_variable_borrow_rate =>
+              let current_liquidity_rate = get_overall_borrow_rate_internal total_borrows_stable total_borrows_variable current_variable_borrow_rate average_stable_borrow_rate in
+              let r = InterestBorrowLiquidityRate current_stable_borrow_rate current_variable_borrow_rate current_liquidity_rate in
+                r
+            end
+
+
+
+(***************************************************)
+(*             The contract definition             *)
+(***************************************************)
+
+contract ZILLending(
+  init_owner: ByStr20,
+  init_configurator: ByStr20,
+  init_lending_pool_manager: ByStr20,
+  init_token_distributor: ByStr20,
+  init_timestamp: Uint256,
+  init_blockbum: Uint256
+)
+
+(*******************************************)
+(*             Core Part                   *)
+(*******************************************)
+
+field owner: ByStr20 = init_owner
+
+field configurator: ByStr20 = init_configurator
+
+field lending_pool_manager: ByStr20  = init_lending_pool_manager
+
+field token_distributor: ByStr20 = init_token_distributor
+
+field reserves_index: Map ByStr20 ReserveIndex = Emp ByStr20 ReserveIndex
+
+field reserves_current_rate: Map ByStr20 ReserveCurrentRate = Emp ByStr20 ReserveCurrentRate
+
+field reserves_config: Map ByStr20 ReserveConfig = Emp ByStr20 ReserveConfig
+
+field reserves_control: Map ByStr20 ReserveControl = Emp ByStr20 ReserveControl
+
+field reserves_extra: Map ByStr20 ReserveExtra = Emp ByStr20 ReserveExtra
+
+field reserve_last_update_timestamp: Map ByStr20 Uint256 = Emp ByStr20 Uint256
+
+(* user address => (reserve => data) *)
+field users_reserve_data: Map ByStr20 (Map ByStr20 UserReserveData) = Emp ByStr20 (Map ByStr20 UserReserveData)
+
+(* asset address => asset address(with balances map)*)
+(* track balances of underlying assets *)
+field reserves_balances: Map ByStr20 (ByStr20 with contract
+                                                field balances: Map ByStr20 Uint128
+                                              end) = Emp ByStr20 (ByStr20 with contract
+                                                                            field balances: Map ByStr20 Uint128
+                                                                          end)
+
+(* we use map rather than a list here *)
+field reserve_list: Map ByStr20 Bool = Emp ByStr20 Bool
+
+(*******************************************)
+(*             Strategy Part               *)
+(*******************************************)
+
+(* due the lack of external lib, we need declear this individually *)
+(* reserve address => (strategy address).base_variable_borrow_rate *)
+field strategy_contract_base_variable_borrow_rate: Map ByStr20 (ByStr20 with contract
+                                                                          field base_variable_borrow_rate: Uint256
+                                                                        end) = Emp ByStr20 (ByStr20 with contract
+                                                                                                      field base_variable_borrow_rate: Uint256
+                                                                                                    end)
+(* reserve address => (strategy address).variable_rate_slope1 *)
+field strategy_contract_variable_rate_slope1: Map ByStr20 (ByStr20 with contract
+                                                                     field variable_rate_slope1: Uint256
+                                                                   end) = Emp ByStr20 (ByStr20 with contract
+                                                                                                 field variable_rate_slope1: Uint256
+                                                                                               end)
+
+
+(* reserve address => (strategy address).variable_rate_slope2 *)
+field strategy_contract_variable_rate_slope2: Map ByStr20 (ByStr20 with contract
+                                                                     field variable_rate_slope2: Uint256
+                                                                   end) = Emp ByStr20 (ByStr20 with contract
+                                                                                                 field variable_rate_slope2: Uint256
+                                                                                               end)
+
+(* reserve address => (strategy address).stable_rate_slope1 *)
+field strategy_contract_stable_rate_slope1: Map ByStr20 (ByStr20 with contract
+                                                                   field stable_rate_slope1: Uint256
+                                                                 end) = Emp ByStr20 (ByStr20 with contract
+                                                                                               field stable_rate_slope1: Uint256
+                                                                                             end)
+
+(* reserve address => (strategy address).stable_rate_slope2 *)
+field strategy_contract_stable_rate_slope2: Map ByStr20 (ByStr20 with contract
+                                                                   field stable_rate_slope2: Uint256
+                                                                 end) = Emp ByStr20 (ByStr20 with contract
+                                                                                               field stable_rate_slope2: Uint256
+                                                                                             end)
+
+(*******************************************)
+(*             Temp Part                   *)
+(*******************************************)
+field reserve_balance_temp: Uint128 = uint128_zero
+
+
+(**************************************)
+(*             Procedures             *)
+(**************************************)
+
+(*******************************************)
+(*             Core Part                   *)
+(*******************************************)
+
+procedure safe_transfer_from(
+    asset: ByStr20,
+    from: ByStr20,
+    to: ByStr20,
+    amount: Uint128
+)
+  msg = {_tag: "TransferFrom";
+         _recipient: asset;
+         _amount: zero_uint128;
+         from: from;
+         to: to;
+         amount: amount};
+  msgs = one_msg msg;
+  send msgs
+end
+
+procedure safe_transfer(
+    asset: ByStr20,
+    from: ByStr20,
+    to: ByStr20,
+    amount: Uint128
+)
+  msg = {_tag: "Transfer";
+         _recipient: asset;
+         _amount: zero_uint128;
+         from: from;
+         to: to;
+         amount: amount};
+  msgs = one_msg msg;
+  send msgs
+end
+
+procedure throw_error(err: Error)
+  e = make_error err;
+  throw e
+end
+
+procedure is_configurator(addr: ByStr20)
+  c <- configurator;
+  is_configurator =  builtin eq addr c;
+  match is_configurator with
+  | True =>
+  | False =>
+    e = SenderNotConfigurator;
+    throw_error e
+  end
+end
+
+procedure is_lending_pool_manager(addr: ByStr20)
+  m <- lending_pool_manager;
+  is_lending_pool_manager = builtin eq addr m;
+  match is_lending_pool_manager with
+  | True =>
+  | False =>
+    e = SenderNotLendingPoolManager;
+    throw_error e
+  end
+end
+
+procedure is_owner(addr: ByStr20)
+  o <- owner;
+  is_owner = builtin eq addr o;
+  match is_owner with
+  | True =>
+  | False =>
+    e = SenderNotOwner;
+    throw_error e
+  end
+end
+
+procedure reserve_should_not_exist(reserve: ByStr20)
+  config_opt <- reserves_config[reserve];
+  match config_opt with
+  | Some config =>
+    e = ReserveExist;
+    throw_error e
+  | None =>
+  end
+end
+
+(* @dev initializes a reserve *)
+(* @param reserve the address of the reserve *)
+(* @param aToken_address the address of the overlying aTken contract *)
+(* @param decimals the decimals of the reserve currency *)
+(* @param interest_rate_strategy_address the address of the interest rate strategy contract *)
+procedure init_reserve_core(
+  reserve: ByStr20,
+  aToken_address: ByStr20,
+  decimals: Uint256,
+  interest_rate_strategy_address: ByStr20
+)
+  reserve_should_not_exist reserve;
+  ri = ReserveIndex ray ray;
+  reserves_index[reserve] := ri;
+
+  rc = ReserveConfig uint256_0 uint256_0 decimals aToken_address interest_rate_strategy_address;
+  reserves_config[reserve] := rc;
+
+  rc = ReserveControl bool_inactive bool_inactive bool_inactive bool_active bool_inactive;
+  reserves_control[reserve] := rc;
+
+  reserve_list[reserve] := bool_active
+end
+
+procedure init_reserve_with_data(
+  reserve: ByStr20,
+  a_token_name: String,
+  a_token_symbol: String,
+  underlying_asset_decimals: Uint256,
+  interest_rate_strategy_address: ByStr20,
+  aToken_address: ByStr20
+)
+  init_reserve_core reserve aToken_address underlying_asset_decimals interest_rate_strategy_address;
+  e = { _eventname: "init_reserve"; reserve: reserve; aToken_address: aToken_address; interest_rate_strategy_address: interest_rate_strategy_address };
+  event e
+end
+
+(* @dev enables or disables a reserve as collateral *)
+(* @param reserve the address of the principal reserve where the user deposited *)
+(* @param user the address of the depositor *)
+(* @param user_as_collateral true if the depositor wants to use the reserve as collateral *)
+procedure set_user_user_reserve_as_collateral(reserve: ByStr20, user: ByStr20, user_as_collateral: Bool)
+  users_reserve_data_opt <- users_reserve_data[user][reserve];
+  match users_reserve_data_opt with
+  | Some (UserReserveData principal_borrow_balance last_variable_borrow_cummulative_index originateion_fee stable_borrow_rate user_as_collateral_old) =>
+    new_users_reserve_data = UserReserveData principal_borrow_balance last_variable_borrow_cummulative_index originateion_fee stable_borrow_rate user_as_collateral;
+    users_reserve_data[user][reserve] := new_users_reserve_data
+  | None =>
+    e = UserReserveDataNotExists;
+    throw_error e
+  end
+end
+
+(* @dev updates the liquidity cmulative index Ci and variable borrow cumulative index Bvc.*)
+procedure update_cumulative_indexes(reserve: ByStr20, this_timestamp: Uint256)
+  re_opt <- reserves_extra[reserve];
+  match re_opt with
+  | Some re =>
+    total_borrows = get_total_borrow re;
+    is_total_borrows_gt_zero = builtin lt uint256_0 total_borrows;
+    match is_total_borrows_gt_zero with
+    | True =>
+      rcr_opt <- reserves_current_rate[reserve];
+      rlut_opt <- reserve_last_update_timestamp[reserve];
+      ri_opt <- reserves_index[reserve];
+
+      current_liquidity_rate = decode_current_liquidity_rate rcr_opt;
+      last_update_timestamp = decode_last_update_timestamp rlut_opt;
+      cumulated_liquidity_interest = calculate_linear_interest current_liquidity_rate this_timestamp last_update_timestamp;
+
+      last_liquidity_cumulative_index = decode_last_liquidity_cumulative_index ri_opt;
+      next_last_liquidity_cumulative_index = ray_mul cumulated_liquidity_interest last_liquidity_cumulative_index;
+      next_index = encode_last_liquidity_cumulative_index ri_opt next_last_liquidity_cumulative_index;
+      reserves_index[reserve] := next_index;
+
+      current_variable_borrow_rate = decode_current_variable_borrow_rate rcr_opt;
+      cumulated_variable_borrow_interest = calculate_compounded_interest current_variable_borrow_rate this_timestamp last_update_timestamp;
+
+      last_variable_borrow_cumulative_index = decode_last_variable_borrow_cumulative_index ri_opt;
+      next_last_variable_borrow_cumulative_index = ray_mul cumulated_variable_borrow_interest last_variable_borrow_cumulative_index;
+      next_reserve_index = encode_last_variable_borrow_cumulative_index ri_opt next_last_variable_borrow_cumulative_index;
+      reserves_index[reserve] := next_reserve_index
+    | False => (* do nothing *)
+    end
+  | None =>
+    e = ReserveNotExists;
+    throw_error e
+  end
+end
+
+
+
+(* update reserve balance of this *)
+procedure update_this_reserve_balance(reserve: ByStr20)
+  is_zero_addr = builtin eq reserve zero_address;
+  match is_zero_addr with
+  | True =>
+    bal <- _balance;
+    reserve_balance_temp := bal
+  | False =>
+    reserve_contract_opt  <- reserves_balances[reserve];
+    match reserve_contract_opt with
+    | Some reserve_contract =>
+      balance_opt <- &reserve_contract.balances[_this_address];
+      match balance_opt with
+      | Some bal =>
+        reserve_balance_temp := bal
+      | None =>
+      end
+    | None =>
+    end
+  end
+end
+
+procedure clean_this_reserve_balance()
+  reserve_balance_temp := uint128_zero
+end
+
+(* todo we don't know how to handle oracle yet *)
+procedure update_reserve_interest_rates_and_timestamp_internal(
+  reserve: ByStr20,
+  liquidity_added: Uint256,
+  liquidity_taken: Uint256,
+  current_stable_borrow_rate_oracle: Uint256
+)
+  update_this_reserve_balance reserve;
+  available_liquidity_tmp <- reserve_balance_temp;
+  available_liquidity_256 = u128_to_u256 available_liquidity_tmp;
+  available_liquidity_added = builtin add available_liquidity_256 liquidity_added;
+  available_liquidity = builtin sub available_liquidity_added liquidity_taken;
+  e = { _eventname: "update_reserve_interest_rates_and_timestamp_internal"; available_liquidity: available_liquidity };
+  clean_this_reserve_balance;
+  rc <- reserves_config[reserve];
+  match rc with
+  | Some (ReserveConfig _ _ _ strategy_addr _) =>
+    base_variable_rate_reader_opt <- strategy_contract_base_variable_borrow_rate[strategy_addr];
+    variable_rate_slope1_reader_opt <- strategy_contract_variable_rate_slope1[strategy_addr];
+    variable_rate_slope2_reader_opt <- strategy_contract_variable_rate_slope2[strategy_addr];
+    stable_rate_slope1_reader_opt <- strategy_contract_stable_rate_slope1[strategy_addr];
+    stable_rate_slope2_reader_opt <- strategy_contract_stable_rate_slope2[strategy_addr];
+    match base_variable_rate_reader_opt with
+    | Some base_variable_rate_reader =>
+      base_variable_rate <- &base_variable_rate_reader.base_variable_borrow_rate;
+      match variable_rate_slope1_reader_opt with
+      | Some variable_rate_slope1_reader =>
+        variable_rate_slope1 <- &variable_rate_slope1_reader.variable_rate_slope1;
+        match variable_rate_slope2_reader_opt with
+        | Some variable_rate_slope2_reader =>
+           variable_rate_slope2 <- &variable_rate_slope2_reader.variable_rate_slope2;
+           match stable_rate_slope1_reader_opt with
+           | Some stable_rate_slope1_reader =>
+             stable_rate_slope1 <- &stable_rate_slope1_reader.stable_rate_slope1;
+             match stable_rate_slope2_reader_opt with
+             | Some stable_rate_slope2_reader =>
+               stable_rate_slope2 <- &stable_rate_slope2_reader.stable_rate_slope2;
+               re_opt <- reserves_extra[reserve];
+               rcr_opt <- reserves_current_rate[reserve];
+               total_borrows_stable = decode_total_borrows_stable re_opt;
+               total_borrow_variable = decode_total_borrows_variable re_opt;
+               current_average_stable_borrow_rate = decode_current_average_stable_borrow_rate rcr_opt;
+               interest_borrow_rates = calculate_interest_rates
+                                         available_liquidity
+                                         total_borrows_stable
+                                         total_borrow_variable
+                                         current_average_stable_borrow_rate
+                                         current_stable_borrow_rate_oracle
+                                         stable_rate_slope1
+                                         stable_rate_slope2
+                                         base_variable_rate
+                                         variable_rate_slope1
+                                         variable_rate_slope2
+               (* todo update reserve *)
+             | None => throw
+             end
+           | None => throw
+           end
+        | None => throw
+        end
+      | None => throw
+      end
+    | None => throw
+    end
+  | None =>
+    throw
+  end
+end
+
+procedure update_state_on_deposit(
+  reserve: ByStr20,
+  user: ByStr20,
+  amount: Uint256,
+  is_first_deposit: Bool,
+  current_stable_borrow_rate_oracle: Uint256
+)
+end
+
+(*******************************************)
+(*             Strategy Part               *)
+(*******************************************)
+
+(***************************************************)
+(*                  Transition                     *)
+(***************************************************)
+
+(***************************************************)
+(*            House keeping transition             *)
+(***************************************************)
+
+(* @dev initializes a reserve *)
+(* @param reserve the address of the reserve to be initialized *)
+(* @param underlying_asset_decimals the decimals of the reserve underlying asset *)
+(* @param interest_rate_strategy_address the address of the interest rate strategy contract for this reserve *)
+(* @param aToken_address *)
+(* @param reserve_name *)
+(* @param reserve_symbol *)
+transition init_reserve(
+  reserve: ByStr20,
+  underlying_asset_decimals: Uint256,
+  interest_rate_strategy_address: ByStr20,
+  aToken_address: ByStr20,
+  reserve_name: String,
+  reserve_symbol: String
+)
+  is_lending_pool_manager _sender;
+  a = "ZILLending Interest bearing";
+  a_token_name = builtin concat a reserve_name;
+  b = "a";
+  a_token_symbol = builtin concat b reserve_symbol;
+  init_reserve_with_data reserve a_token_name a_token_symbol underlying_asset_decimals interest_rate_strategy_address aToken_address
+end
+
+(* @dev updates the address of the interest rate strategy contract *)
+(* @param reverse the address of the reverse *)
+(* @param rate_strategy_address the address of the interest rate strategy contract *)
+transition set_reserve_interest_rate_strategy_address(reserve: ByStr20, rate_strategy_address: ByStr20)
+  is_configurator _sender;
+  rc_opt <- reserves_config[reserve];
+  match rc_opt with
+  | Some (ReserveConfig liquidation_threshold liquidation_bonus decimals a_token_address _) =>
+    new_rc = ReserveConfig liquidation_threshold liquidation_bonus decimals a_token_address rate_strategy_address;
+    reserves_config[reserve] := new_rc
+  | None =>
+    e = ReserveNotExists;
+    throw_error e
+  end
+end
+
+(* @dev enables borrowing on a reserve. Also sets the stable rate borrowing *)
+(* @param reserve the address of the reserve *)
+(* @param stable_borrow_rate_enabled true if the stable rate needs to be enabled, false otherwise *)
+transition enable_borrowing_on_reverse(reserve: ByStr20, stable_borrow_rate_enabled: Bool)
+  is_configurator _sender;
+  rc_opt <- reserves_control[reserve];
+  match rc_opt with
+  | Some (ReserveControl _ usage_as_collateral_enabled _ is_active is_freezed) =>
+    new_rc = ReserveControl bool_active usage_as_collateral_enabled stable_borrow_rate_enabled is_active is_freezed;
+    reserves_control[reserve] := new_rc
+  | None =>
+    e = ReserveNotExists;
+    throw_error e
+  end
+end
+
+(* @dev disables borrowing on a reserve *)
+(* @param reserve the address of the reserve *)
+transition disable_borrowing_on_reverse(reserve: ByStr20)
+  is_configurator _sender;
+  rc_opt <- reserves_control[reserve];
+  match rc_opt with
+  | Some (ReserveControl _ usage_as_collateral_enabled is_stable_borrow_rate_enabled is_active is_freezed) =>
+    new_rc = ReserveControl bool_inactive usage_as_collateral_enabled is_stable_borrow_rate_enabled is_active is_freezed;
+    reserves_control[reserve] := new_rc
+  | None =>
+    e = ReserveNotExists;
+    throw_error e
+  end
+end
+
+
+
+(* @dev deposits the underlying asset into the reserve. A corresponging amount of the *)
+(* overlying asset (aTokens) is minted. *)
+(* @param reverse the address of the reserve *)
+(* @param amount the amount to be deposited *)
+transition deposit(reverse: ByStr20, amount: Uint128)
+end
+
+transition redeemUnderlying()
+end
+
+transition borrow()
+end
+
+transition repay()
+end
+
+(***************************************************)
+(*                 Testing transition              *)
+(***************************************************)
+transition test_get_operation_list(from: Uint32, to: Uint32)
+  r = get_operation_list from to;
+  e = { _eventname: "test_get_operation_list"; r: r};
+  event e
+end
+
+transition test_set_reserve_balance(addr: ByStr20, asset: ByStr20 with contract
+                                                                      field balances: Map ByStr20 Uint128
+                                                                  end)
+  reserves_balances[addr] := asset
+end
+
+transition test_read_reserve_balance(addr: ByStr20)
+  reserve_contract_opt  <- reserves_balances[addr];
+  match reserve_contract_opt with
+  | Some reserve_contract =>
+    balance_opt <- &reserve_contract.balances[addr];
+    match balance_opt with
+    | Some bal =>
+      e = { _eventname: "test_read_reserve_balance"; bal: bal};
+      event e
+    | None =>
+    end
+  | None =>
+  end
+end
+
+transition test_set_strategy_address(reserve: ByStr20, strategy: ByStr20 with contract
+                                                                          field base_variable_borrow_rate: Uint256
+                                                                         end)
+  strategy_contract_base_variable_borrow_rate[reserve] := strategy
+end
+
+transition test_read_strategy_contract_base_variable_borrow_rate(reserve: ByStr20)
+  strategy_contract_opt <- strategy_contract_base_variable_borrow_rate[reserve];
+  match strategy_contract_opt with
+  | Some strategy_contract =>
+    strategy_contract_base_variable_borrow_rate <- &strategy_contract.base_variable_borrow_rate;
+    e = { _eventname: "test_read_strategy"; strategy_contract_base_variable_borrow_rate: strategy_contract_base_variable_borrow_rate };
+    event e
+  | None =>
+  end
+end
