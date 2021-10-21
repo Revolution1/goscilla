@@ -1,21 +1,5 @@
-type Error =
-  | SenderNotConfigurator
-  | ReserveNotExists
-  | UserReserveDataNotExists
-  | SenderNotLendingPoolManager
-  | SenderNotOwner
-  | ReserveExist of Uint32
-
-let make_error =
-  fun (result: Error) =>
-    let result_code =
-      match result with
-            | SenderNotConfigurator => Int32 -1
-            | ReserveNotExists => Int32 -2
-            | UserReserveDataNotExists => Int32 -3
-        | SenderNotLendingPoolManager => Int32 -4
-            | SenderNotOwner => Int32 -5
-            | ReserveExist => let a = Int32 -6
-      end
-    in
-    {_exception: "Error"; code: result_code}
+field strategy_contract_variable_rate_slope1: Map ByStr20 (ByStr20 with contract
+  field variable_rate_slope1: Uint256
+end) = Emp ByStr20 (ByStr20 with contract
+                              field variable_rate_slope1: Uint256
+                            end)

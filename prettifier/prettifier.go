@@ -3,7 +3,6 @@ package prettifier
 import (
 	"bytes"
 	"container/list"
-	"fmt"
 	"goscilla/token"
 	"io"
 	"strings"
@@ -351,7 +350,7 @@ func (p *prettifier) prettify() error {
 func (p *prettifier) code() string {
 	p.buf.Reset()
 	for e := p.tokenList.Front(); e != nil; e = e.Next() {
-		fmt.Println(e.Value)
+		//fmt.Println(e.Value)
 		p.buf.WriteString(e.Value.(*token.Token).Value())
 	}
 	return p.buf.String()
