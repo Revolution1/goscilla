@@ -14,22 +14,22 @@ const (
 
 	// from https://github.com/Zilliqa/scilla/blob/master/src/base/ScillaLexer.mll
 	// whitespaces
-	NEWLINE
-	COMMENT
-	WHITESPACE
+	NEWLINE    // \n \r \r\n
+	COMMENT    // (* xxx *)
+	WHITESPACE // " " \t
 
 	// Literals
-	STRING_LIT
-	NUM_LIT
-	HEX_LIT
+	STRING_LIT // "xxxx"
+	NUM_LIT    // 123
+	HEX_LIT    // 0x1234abcd
 
 	// Prime types
-	INT_TYPE
-	STRING_TYPE
-	BYSTR_TYPE
-	BNUM_TYPE
-	MESSAGE_TYPE
-	EVENT_TYPE
+	INT_TYPE     // IntXX UintXX
+	STRING_TYPE  // String
+	BYSTR_TYPE   // ByStrXX
+	BNUM_TYPE    // BNum
+	MESSAGE_TYPE // Message
+	EVENT_TYPE   // Event
 
 	// Keywords
 	FORALL
@@ -63,25 +63,25 @@ const (
 	THROW
 
 	// Separators
-	SEMICOLON
-	COLON
-	PERIOD
-	BAR
-	LSQB
-	RSQB
-	LPAREN
-	RPAREN
-	LBRACE
-	RBRACE
-	COMMA
-	ARROW
-	TARROW
-	EQ
-	AND
-	FETCH
-	ASSIGN
-	AT
-	UNDERSCORE
+	SEMICOLON  // ;
+	COLON      // :
+	PERIOD     // .
+	BAR        // |
+	LSQB       // [
+	RSQB       // ]
+	LPAREN     // (
+	RPAREN     // )
+	LBRACE     // {
+	RBRACE     // }
+	COMMA      // ,
+	ARROW      // =>
+	TARROW     // ->
+	EQ         // =
+	AND        // &
+	FETCH      // <-
+	ASSIGN     // :=
+	AT         // @
+	UNDERSCORE // _
 
 	// Identifiers
 	ID   // simple name          [a-z][A-Za-z0-9_]*
@@ -91,13 +91,13 @@ const (
 
 	// from https://github.com/Zilliqa/scilla/blob/master/src/base/Datatypes.ml
 	// Builtin ADT
-	BOOL
-	TRUE
-	FALSE
+	BOOL  // Bool
+	TRUE  // True
+	FALSE // False
 
-	NAT
-	ZERO
-	SUCC
+	NAT  // Nat
+	ZERO // Zero
+	SUCC // Succ
 
 	OPTION
 	SOME
@@ -109,8 +109,12 @@ const (
 
 	PAIR
 
+	// only for pretty formatting
+	//INDENT
+	//ALIGN
+	//ADDRESS_WITH
+
 	// Other tokens
-	INDENT // only for pretty formatting
 	EOF
 )
 
@@ -132,7 +136,6 @@ var TokenTable = [EOF + 1]string{
 	SPID: "SPID",
 
 	// others
-	INDENT:  "INDENT",
 	ILLEGAL: "ILLEGAL",
 	EOF:     "EOF",
 }

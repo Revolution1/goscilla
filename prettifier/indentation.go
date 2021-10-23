@@ -1,7 +1,6 @@
 package prettifier
 
 import (
-	"container/list"
 	"github.com/sirupsen/logrus"
 	"goscilla/token"
 )
@@ -24,10 +23,10 @@ func indent(p *prettifier) error {
 				continue
 			}
 			// try pop context based on token at the end of line
-			if e.Prev() != nil && e.Prev().Value != nil && len(p.contexts) > 0 {
+			if !isNilElm(e.Prev()) && len(p.contexts) > 0 {
 				prev := e.Prev().Value.(*token.Token)
 				switch p.contexts[0] {
-				case token.LET:
+				case token.LET, token.TRANSITION, token.PROCEDURE:
 					switch prev.Kind {
 					// name and lit pop all let or type context until hit a bar
 					case token.ID, token.CID, token.SPID,
@@ -65,20 +64,42 @@ func indent(p *prettifier) error {
 		default:
 			aroundComments = false
 			switch t.Kind {
-			case token.IMPORT, token.LIBRARY, token.SCILLA_VERSION, token.CONTRACT, token.TRANSITION, token.PROCEDURE, token.TYPE, token.FIELD:
+			// keywords always on top of line
+			case token.IMPORT, token.LIBRARY, token.SCILLA_VERSION, token.TRANSITION, token.PROCEDURE, token.TYPE:
 				p.clearContext()
+				trimSpaceLeft(p, e)
 				switch t.Kind {
 				case token.TRANSITION, token.PROCEDURE, token.TYPE:
 					p.pushContext(t.Kind)
 				}
+			case token.CONTRACT, token.FIELD:
+				if len(p.contexts) > 0 {
+					insertIndents(p, e)
+				} else {
+					trimSpaceLeft(p, e)
+				}
+			case token.WITH:
+				insertIndents(p, e)
+				prev := prevNonSpaceElm(e)
+				if !isNilElm(prev) && isByStr20(prev.Value.(*token.Token)) {
+					trimAllSpaceLeft(p, e) // ByStr20 with always on one line
+					p.tokenList.InsertBefore(spaceTok, e)
+					p.pushContext(token.BYSTR_TYPE)
+				} else if len(p.contexts) > 0 {
+					if p.tailContext(0) != token.MATCH {
+						p.pushContext(token.WITH)
+					}
+				} else {
+					p.pushContext(token.WITH)
+				}
 			case token.MATCH:
-				if !firstTokenOfLine(e) {
+				if !firstNonSpaceTokenOfLine(e) {
 					p.tokenList.InsertBefore(newLineTok, e)
 				}
 				insertIndents(p, e)
 				p.pushContext(t.Kind)
 			case token.FUN, token.TFUN:
-				if !firstTokenOfLine(e) {
+				if !firstNonSpaceTokenOfLine(e) {
 					p.tokenList.InsertBefore(newLineTok, e)
 				}
 				insertIndents(p, e)
@@ -90,16 +111,16 @@ func indent(p *prettifier) error {
 					trimOneIndent(p, e)
 				}
 			case token.LET:
-				if !firstTokenOfLine(e) { // need a newline before it
+				if !firstNonSpaceTokenOfLine(e) { // need a newline before it
 					p.tokenList.InsertBefore(newLineTok, e)
 				}
 				if len(p.contexts) > 0 { // upgrade to top tier
 					var upgrade bool
-					if p.contexts[0] == token.TYPE{
+					if p.contexts[0] == token.TYPE {
 						upgrade = true
 					} else if p.contexts[0] == token.LET {
 						lastElm := lastElmOfPrevLine(e)
-						if lastElm != nil && lastElm.Value != nil {
+						if lastElm != nil {
 							tok := lastElm.Value.(*token.Token)
 							switch tok.Kind {
 							case token.IN, token.TARROW, token.ARROW, token.FETCH, token.SEMICOLON, token.EQ:
@@ -110,7 +131,7 @@ func indent(p *prettifier) error {
 					}
 					if upgrade {
 						p.clearContext()
-						trimLeft(p, e)
+						trimSpaceLeft(p, e)
 					}
 				}
 				insertIndents(p, e)
@@ -122,19 +143,27 @@ func indent(p *prettifier) error {
 					trimOneIndent(p, e)
 				}
 			case token.BAR:
-				if !firstTokenOfLine(e) {
+				if !firstNonSpaceTokenOfLine(e) {
 					p.tokenList.InsertBefore(newLineTok, e)
+				}
+				if len(p.contexts) > 0 && p.tailContext(0) == t.Kind {
+					p.popContext()
 				}
 				insertIndents(p, e)
 				if !p.option.IndentBar {
 					trimOneIndent(p, e)
 				}
 				p.pushContext(t.Kind)
+			case token.ARROW:
+				if len(p.contexts) > 0 && p.tailContext(0) == token.WITH {
+					p.popContext()
+				}
+				insertIndents(p, e)
 			case token.END:
 			Loop:
 				for len(p.contexts) > 0 {
 					switch p.tailContext(0) {
-					case token.MATCH, token.WITH, token.TRANSITION, token.PROCEDURE:
+					case token.MATCH, token.BYSTR_TYPE, token.TRANSITION, token.PROCEDURE:
 						p.popContext() // pop above context
 						break Loop
 					default:
@@ -147,6 +176,14 @@ func indent(p *prettifier) error {
 				if p.tailContext(0) == token.LET {
 					trimOneIndent(p, e)
 				}
+			case token.LBRACE, token.LPAREN, token.LSQB:
+				insertIndents(p, e)
+				p.pushContext(t.Kind)
+			case token.RBRACE, token.RPAREN, token.RSQB:
+				if len(p.contexts) > 0 && p.tailContext(0) == t.Kind-1 {
+					p.popContext()
+				}
+				insertIndents(p, e)
 			default:
 				insertIndents(p, e)
 			}
@@ -156,60 +193,4 @@ func indent(p *prettifier) error {
 		}
 	}
 	return nil
-}
-
-func insertIndents(p *prettifier, e *list.Element) {
-	if firstTokenOfLine(e) {
-		trimLeft(p, e)
-		for _, _ = range p.contexts {
-			p.tokenList.InsertBefore(token.NewOrphanToken(token.INDENT, p.option.IndentStr), e)
-		}
-	}
-}
-
-func trimLeft(p *prettifier, e *list.Element) {
-	i := e.Prev()
-	for i != nil && i.Value != nil {
-		tok := i.Value.(*token.Token)
-		if tok.Kind == token.WHITESPACE {
-			p.tokenList.Remove(i)
-			i = e.Prev()
-			continue
-		}
-		break
-	}
-}
-
-func firstTokenOfLine(e *list.Element) bool {
-	i := e.Prev()
-	for i != nil && i.Value != nil {
-		t := i.Value.(*token.Token)
-		if t.Kind == token.WHITESPACE {
-			i = i.Prev()
-		} else if t.Kind == token.NEWLINE {
-			return true
-		} else {
-			return false
-		}
-	}
-	return true
-}
-
-func lastElmOfPrevLine(e *list.Element) *list.Element {
-	i := e.Prev()
-	for i != nil && i.Value != nil {
-		t := i.Value.(*token.Token)
-		if t.Kind == token.WHITESPACE || t.Kind == token.NEWLINE {
-			i = i.Prev()
-		} else {
-			return i
-		}
-	}
-	return i
-}
-
-func trimOneIndent(p *prettifier, e *list.Element) {
-	if e.Prev() != nil && e.Prev().Value != nil && e.Prev().Value.(*token.Token).Kind == token.INDENT {
-		p.tokenList.Remove(e.Prev())
-	}
 }

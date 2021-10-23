@@ -1,5 +1,33 @@
-field strategy_contract_variable_rate_slope1: Map ByStr20 (ByStr20 with contract
-  field variable_rate_slope1: Uint256
-end) = Emp ByStr20 (ByStr20 with contract
-                              field variable_rate_slope1: Uint256
-                            end)
+
+
+              procedure update_this_reserve_balance(reserve: ByStr20)
+              is_zero_addr = builtin eq reserve zero_address;
+              match is_zero_addr with
+              | True =>
+                  bal <- _balance;
+                  reserve_balance_temp := bal
+                | False =>
+                    reserve_contract_opt <- reserves_balances[reserve];
+                    match reserve_contract_opt with
+                    | Some reserve_contract =>
+                        balance_opt <- &reserve_contract.balances[_this_address];
+                        match balance_opt with
+                        | Some bal =>
+                            reserve_balance_temp := bal
+                          | None =>
+                        end
+                      | None =>
+                    end
+              end
+            end
+            
+
+            field fname: Map ByStr20 (ByStr20 
+              with contract
+                                                field var1: Uint256
+                                              end
+                                              ) = Emp ByStr20 (
+                                                ByStr20 with contract
+                                                                            field var1: Uint256
+                                                                          end
+                                                                          )

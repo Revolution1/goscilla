@@ -11,13 +11,14 @@ var rules = []Rule{
 	onlyOneEmptyLine,
 	noOnlySpaceLine,
 	allMidLineSpaceSingle,
-
-	indent,
+	withCloseBehindByStr20,
 
 	spaceBeforeTokens,
 	spaceAfterTokens,
 	noSpaceBeforeTokens,
 	noSpaceAfterTokens,
+
+	indent,
 
 	noTrailingSpace,
 	cleanLinesBeforeEOF,
@@ -41,7 +42,7 @@ func noTrailingSpace(p *prettifier) error {
 		if t.Kind == token.NEWLINE {
 			for e.Prev() != nil && e.Prev().Value != nil {
 				prevKind := e.Prev().Value.(*token.Token).Kind
-				if prevKind == token.WHITESPACE || prevKind == token.INDENT {
+				if isSpace(prevKind){
 					p.tokenList.Remove(e.Prev())
 				} else {
 					break
@@ -138,6 +139,9 @@ func spaceBeforeTokens(p *prettifier) error {
 		t := e.Value.(*token.Token)
 		switch t.Kind {
 		case token.EQ, token.TARROW, token.ARROW, token.FETCH:
+			//token.ID, token.CID, token.SPID,
+			//token.NUM_LIT, token.STRING_LIT, token.TRUE, token.FALSE, token.ZERO,
+			//token.WITH:
 			if e.Prev() != nil && e.Prev().Value != nil && e.Prev().Value.(*token.Token).Kind != token.WHITESPACE {
 				p.tokenList.InsertBefore(spaceTok, e)
 			} else {
@@ -217,6 +221,22 @@ func onlyOneEmptyLine(p *prettifier) error {
 		if e != nil {
 			e = e.Next()
 		}
+	}
+	return nil
+}
+
+func withCloseBehindByStr20(p *prettifier) error {
+	e := p.tokenList.Front()
+	for e != nil {
+		t := e.Value.(*token.Token)
+		if t.Kind == token.WITH {
+			prev := prevNonSpaceElm(e)
+			if !isNilElm(prev) && isByStr20(prev.Value.(*token.Token)) {
+				trimAllSpaceLeft(p, e) // ByStr20 with always on one line
+				p.tokenList.InsertBefore(spaceTok, e)
+			}
+		}
+		e = e.Next()
 	}
 	return nil
 }
