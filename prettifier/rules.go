@@ -5,7 +5,7 @@ import (
 	"goscilla/token"
 )
 
-// rules available rule list, ps: order matters
+// rules available rule list, *Notice*: order matters
 var rules = []Rule{
 	noEmptyLineAtStartOfFile,
 	onlyOneEmptyLine,

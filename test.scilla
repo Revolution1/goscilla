@@ -1,33 +1,71 @@
+(* todo we don't know how to handle oracle yet *)
+procedure update_reserve_interest_rates_and_timestamp_internal(
+  reserve: ByStr20,
+  liquidity_added: Uint256,
+  liquidity_taken: Uint256,
+  current_stable_borrow_rate_oracle: Uint256,
+  current_timestamp: Uint256
+)
+  update_this_reserve_balance reserve;
+  available_liquidity_tmp <- reserve_balance_temp;
+  available_liquidity_256 = u128_to_u256 available_liquidity_tmp;
+  available_liquidity_added = builtin add available_liquidity_256 liquidity_added;
+  available_liquidity = builtin sub available_liquidity_added liquidity_taken;
+  e = { _eventname: "update_reserve_interest_rates_and_timestamp_internal_available"; available_liquidity: available_liquidity };
+  clean_this_reserve_balance;
+  rc <- reserves_config[reserve];
+  match rc with
+  | Some (ReserveConfig _ _ _ strategy_addr _) =>
+    strategy_contract_reader_opt <- strategy_contract_reader[strategy_addr];
+    match strategy_contract_reader_opt with
+    | Some strategy_contract_reader =>
+      base_variable_rate <- &strategy_contract_reader.base_variable_borrow_rate;
+      variable_rate_slope1 <- &strategy_contract_reader.variable_rate_slope1;
+      variable_rate_slope2 <- &strategy_contract_reader.variable_rate_slope2;
+      stable_rate_slope1 <- &strategy_contract_reader.stable_rate_slope1;
+      stable_rate_slope2 <- &strategy_contract_reader.stable_rate_slope2;
+      re_opt <- reserves_extra[reserve];
+      rcr_opt <- reserves_current_rate[reserve];
+      total_borrows_stable = decode_total_borrows_stable re_opt;
+      total_borrow_variable = decode_total_borrows_variable re_opt;
+      current_average_stable_borrow_rate = decode_current_average_stable_borrow_rate rcr_opt;
+      interest_borrow_rates = calculate_interest_rates
+                                available_liquidity
+                                total_borrows_stable
+                                total_borrow_variable
+                                current_average_stable_borrow_rate
+                                current_stable_borrow_rate_oracle
+                                stable_rate_slope1
+                                stable_rate_slope2
+                                base_variable_rate
+                                variable_rate_slope1
+                                variable_rate_slope2;
+      match interest_borrow_rates with
+      | InterestBorrowLiquidityRate current_stable_borrow_rate current_variable_borrow_rate current_liquidity_rate =>
+        reserves_current_rate_opt <- reserves_current_rate[reserve];
+        next_reserves_current_rate = match reserves_current_rate_opt with
+        | Some (ReserveCurrentRate _ _ _ current_average_stable_borrow_rate) =>
+          ReserveCurrentRate current_liquidity_rate current_variable_borrow_rate current_stable_borrow_rate current_average_stable_borrow_rate
+        | None =>
+          ReserveCurrentRate current_liquidity_rate current_variable_borrow_rate current_stable_borrow_rate uint256_0
+        end;
 
+        reserves_current_rate[reserve] := next_reserves_current_rate;
+        reserve_last_update_timestamp[reserve] := current_timestamp;
 
-              procedure update_this_reserve_balance(reserve: ByStr20)
-              is_zero_addr = builtin eq reserve zero_address;
-              match is_zero_addr with
-              | True =>
-                  bal <- _balance;
-                  reserve_balance_temp := bal
-                | False =>
-                    reserve_contract_opt <- reserves_balances[reserve];
-                    match reserve_contract_opt with
-                    | Some reserve_contract =>
-                        balance_opt <- &reserve_contract.balances[_this_address];
-                        match balance_opt with
-                        | Some bal =>
-                            reserve_balance_temp := bal
-                          | None =>
-                        end
-                      | None =>
-                    end
-              end
-            end
-            
-
-            field fname: Map ByStr20 (ByStr20 
-              with contract
-                                                field var1: Uint256
-                                              end
-                                              ) = Emp ByStr20 (
-                                                ByStr20 with contract
-                                                                            field var1: Uint256
-                                                                          end
-                                                                          )
+        reserve_index_opt <- reserves_index[reserve];
+        last_liquidity_cumulative_index = decode_last_liquidity_cumulative_index reserve_index_opt;
+        last_variable_borrow_cumulative_index = decode_last_variable_borrow_cumulative_index reserve_index_opt;
+        e = { _eventname: "update_reserve_interest_rates_and_timestamp_internal"; reserve: reserve;
+              new_current_liquidity_rate: current_liquidity_rate; new_stable_borrow_rate: current_stable_borrow_rate;
+              new_variable_borrow_rate: current_variable_borrow_rate; last_liquidity_cumulative_index: last_liquidity_cumulative_index;
+              last_variable_borrow_cumulative_index: last_variable_borrow_cumulative_index
+            };
+        event e
+      end
+    | None => throw
+    end
+  | None =>
+    throw
+  end
+end

@@ -72,12 +72,14 @@ func indent(p *prettifier) error {
 				case token.TRANSITION, token.PROCEDURE, token.TYPE:
 					p.pushContext(t.Kind)
 				}
-			case token.CONTRACT, token.FIELD:
-				if len(p.contexts) > 0 {
-					insertIndents(p, e)
-				} else {
-					trimSpaceLeft(p, e)
-				}
+			case token.FIELD:
+				p.pushContext(t.Kind)
+				insertIndents(p, e)
+				//if len(p.contexts) > 0 {
+				//	insertIndents(p, e)
+				//} else {
+				//	trimSpaceLeft(p, e)
+				//}
 			case token.WITH:
 				insertIndents(p, e)
 				prev := prevNonSpaceElm(e)
@@ -180,10 +182,11 @@ func indent(p *prettifier) error {
 				insertIndents(p, e)
 				p.pushContext(t.Kind)
 			case token.RBRACE, token.RPAREN, token.RSQB:
+				insertIndents(p, e)
 				if len(p.contexts) > 0 && p.tailContext(0) == t.Kind-1 {
 					p.popContext()
 				}
-				insertIndents(p, e)
+				trimOneIndent(p, e)
 			default:
 				insertIndents(p, e)
 			}

@@ -117,7 +117,7 @@ func trimOneIndent(p *prettifier, e *list.Element) {
 	}
 }
 
-func lastElmOfKindBefore(k token.Kind, e *list.Element) *list.Element {
+func firstElmOfKindBefore(k token.Kind, e *list.Element) *list.Element {
 	i := e.Prev()
 	for !isNilElm(i) {
 		t := i.Value.(*token.Token)
@@ -126,7 +126,7 @@ func lastElmOfKindBefore(k token.Kind, e *list.Element) *list.Element {
 		}
 		i = i.Prev()
 	}
-	return nil
+	return i
 }
 
 func firstElmOfKindAfter(k token.Kind, e *list.Element) *list.Element {
@@ -138,37 +138,27 @@ func firstElmOfKindAfter(k token.Kind, e *list.Element) *list.Element {
 		}
 		i = i.Next()
 	}
-	return nil
+	return i
 }
 
 func isNilElm(e *list.Element) bool {
 	return e == nil || e.Value == nil
 }
 
-func lineOfElm(e *list.Element) (*list.Element, *list.Element) {
-	start, end := e, e
-	for !isNilElm(start.Prev()) {
-		t := start.Prev().Value.(*token.Token)
-		if t.Kind == token.NEWLINE {
-			break
-		}
-		start = start.Prev()
+func lineStartOfElm(e *list.Element) *list.Element {
+	last := firstElmOfKindBefore(token.NEWLINE, e)
+	if isNilElm(last) {
+		return last
 	}
-	if end.Value.(*token.Token).Kind != token.NEWLINE {
-		for !isNilElm(end.Next()) {
-			t := end.Next().Value.(*token.Token)
-			if t.Kind == token.NEWLINE {
-				break
-			}
-			end = end.Next()
-		}
-	}
-	return start, end
+	return last.Next()
 }
 
 func getLineString(e *list.Element) string {
 	var line string
-	i, _ := lineOfElm(e)
+	i := lineStartOfElm(e)
+	if isNilElm(i) {
+		i = e
+	}
 	for !isNilElm(i.Next()) {
 		t := i.Next().Value.(*token.Token)
 		if t.Kind == token.NEWLINE {
@@ -201,13 +191,60 @@ func getIndent(str string, n int) (indent string) {
 	return
 }
 
+func alignContext(k token.Kind, e *list.Element) int {
+	elm := firstElmOfKindBefore(k, e)
+	if isNilElm(elm) {
+		return 0
+	}
+	align := 0
+	i := elm.Prev()
+	for !isNilElm(i) {
+		t := i.Value.(*token.Token)
+		if t.Kind == token.NEWLINE {
+			break
+		}
+		align = align + len(t.Value())
+		i = i.Prev()
+	}
+	return align
+}
+
+func alignTo(p *prettifier, e *list.Element) {
+	var k token.Kind
+	for i := len(p.contexts) - 1; i >= 0; i-- {
+		if p.contexts[i] != token.FIELD {
+			k = p.contexts[i]
+		}
+	}
+	if k == 0 {
+		return
+	}
+	if len(p.contexts) > 0 {
+		align := alignContext(k, e)
+		if align > 0 {
+			p.tokenList.InsertBefore(
+				token.NewOrphanToken(token.WHITESPACE, getIndent(" ", align)),
+				e)
+		}
+	}
+}
+
 func insertIndents(p *prettifier, e *list.Element) {
+	if isNilElm(e) {
+		return
+	}
 	logrus.Traceln("try indent on:", e.Value.(*token.Token).Value())
 	if firstNonSpaceTokenOfLine(e) {
 		logrus.Traceln("before  trim:", getLineString(e))
 		trimSpaceLeft(p, e)
 		logrus.Traceln("after   trim:", getLineString(e))
-		for _, _ = range p.contexts {
+		if len(p.contexts) > 0 && p.contexts[0] == token.FIELD {
+			alignTo(p, e)
+		}
+		for i := 0; i < len(p.contexts); i++ {
+			if p.contexts[i] == token.FIELD {
+				continue
+			}
 			p.tokenList.InsertBefore(token.NewOrphanToken(token.WHITESPACE, p.option.IndentStr), e)
 		}
 		logrus.Traceln("after indent:", getLineString(e))
